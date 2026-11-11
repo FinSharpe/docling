@@ -57,11 +57,12 @@ class BaseOcrModel(BasePageModel, BaseModelWithOptions):
 
             np_image = np.array(image)
 
-            # Dilate the image by 10 pixels to merge nearby bitmap rectangles
-            structure = np.ones(
-                (20, 20)
-            )  # Create a 20x20 structure element (10 pixels in all directions)
-            np_image = binary_dilation(np_image > 0, structure=structure)
+            # Dilate the image by 10 pixels to merge nearby bitmap rectangles.
+            # A 20x20 structure element (10 pixels in all directions), applied
+            # as a 20x1 then a 1x20 one: the same result with 40 instead of
+            # 400 comparisons per pixel.
+            np_image = binary_dilation(np_image > 0, structure=np.ones((20, 1)))
+            np_image = binary_dilation(np_image, structure=np.ones((1, 20)))
 
             # Find the connected components
             labeled_image, num_features = label(
@@ -86,55 +87,69 @@ class BaseOcrModel(BasePageModel, BaseModelWithOptions):
 
             return (area_frac, bounding_boxes)  # fraction covered  # boxes
 
+        full_page = [
+            BoundingBox(
+                l=0,
+                t=0,
+                r=page.size.width,
+                b=page.size.height,
+                coord_origin=CoordOrigin.TOPLEFT,
+            )
+        ]
+        if self.options.force_full_page_ocr:
+            return full_page
+
         if page._backend is not None:
-            bitmap_rects = page._backend.get_bitmap_rects()
+            bitmap_rects = list(page._backend.get_bitmap_rects())
         else:
             bitmap_rects = []
+
+        # A page without bitmaps has nothing to OCR: skip rasterising it.
+        if not bitmap_rects:
+            return []
 
         coverage, ocr_rects = find_ocr_rects(page.size, bitmap_rects)
 
         # return full-page rectangle if page is dominantly covered with bitmaps
-        if self.options.force_full_page_ocr or coverage > max(
-            BITMAP_COVERAGE_TRESHOLD, self.options.bitmap_area_threshold
-        ):
-            return [
-                BoundingBox(
-                    l=0,
-                    t=0,
-                    r=page.size.width,
-                    b=page.size.height,
-                    coord_origin=CoordOrigin.TOPLEFT,
-                )
-            ]
+        if coverage > max(BITMAP_COVERAGE_TRESHOLD, self.options.bitmap_area_threshold):
+            return full_page
         # return individual rectangles if the bitmap coverage is above the threshold
         elif coverage > self.options.bitmap_area_threshold:
             return ocr_rects
         else:  # overall coverage of bitmaps is too low, drop all bitmap rectangles.
             return []
 
+    @staticmethod
+    def _build_cell_index(cells: List[TextCell]) -> index.Index:
+        """R-tree over the bounding boxes of `cells`."""
+        p = index.Property()
+        p.dimension = 2
+        idx = index.Index(properties=p)
+        for i, cell in enumerate(cells):
+            idx.insert(i, cell.rect.to_bounding_box().as_tuple())
+        return idx
+
+    @staticmethod
+    def _rect_overlaps_index(idx: index.Index, rect) -> bool:
+        """True if `rect` (a BoundingRectangle) intersects any indexed cell.
+
+        This is the one overlap criterion for OCR-vs-programmatic cells: both
+        `_filter_ocr_cells` and OCR engines that skip recognition for covered
+        boxes must use it, so that skipping never changes which cells survive.
+        """
+        possible_matches_index = list(
+            idx.intersection(rect.to_bounding_box().as_tuple())
+        )
+        return len(possible_matches_index) > 0  # a weak criterion but it works.
+
     # Filters OCR cells by dropping any OCR cell that intersects with an existing programmatic cell.
     def _filter_ocr_cells(
         self, ocr_cells: List[TextCell], programmatic_cells: List[TextCell]
     ) -> List[TextCell]:
-        # Create R-tree index for programmatic cells
-        p = index.Property()
-        p.dimension = 2
-        idx = index.Index(properties=p)
-        for i, cell in enumerate(programmatic_cells):
-            idx.insert(i, cell.rect.to_bounding_box().as_tuple())
-
-        def is_overlapping_with_existing_cells(ocr_cell):
-            # Query the R-tree to get overlapping rectangles
-            possible_matches_index = list(
-                idx.intersection(ocr_cell.rect.to_bounding_box().as_tuple())
-            )
-
-            return (
-                len(possible_matches_index) > 0
-            )  # this is a weak criterion but it works.
+        idx = self._build_cell_index(programmatic_cells)
 
         filtered_ocr_cells = [
-            rect for rect in ocr_cells if not is_overlapping_with_existing_cells(rect)
+            cell for cell in ocr_cells if not self._rect_overlaps_index(idx, cell.rect)
         ]
 
         return filtered_ocr_cells

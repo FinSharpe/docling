@@ -276,6 +276,17 @@ class RapidOcrOptions(OcrOptions):
             description="Enable text recognition stage. If None, uses RapidOCR default behavior."
         ),
     ] = None
+    skip_recognition_on_programmatic_text: Annotated[
+        bool,
+        Field(
+            description=(
+                "Skip text classification and recognition for detected text boxes that overlap a "
+                "programmatic (PDF text layer) cell. Docling drops the OCR cell of such a box anyway, "
+                "so the output does not change; only the wasted recognition work is saved. Has no "
+                "effect with `force_full_page_ocr`, where OCR cells replace the text layer."
+            )
+        ),
+    ] = True
     print_verbose: Annotated[
         bool,
         Field(
