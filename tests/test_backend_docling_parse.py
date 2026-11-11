@@ -91,3 +91,35 @@ def test_num_pages(test_doc_path):
 
     # Explicitly clean up resources to prevent race conditions in CI
     doc_backend.unload()
+
+
+def test_native_page_is_unloaded_once_parsed(test_doc_path):
+    """docling-parse keeps over 1 GB committed per decoded page until the page
+    is unloaded; the parsed page is self-contained, so the backend must not
+    hold the native page while the page travels through a pipeline."""
+    doc_backend = _get_backend(test_doc_path)
+    page_backend: DoclingParsePageBackend = doc_backend.load_page(0)
+
+    cells = list(page_backend.get_text_cells())
+
+    assert len(cells) > 0
+    assert page_backend._unloaded is True
+    assert doc_backend.dp_doc is not None
+    assert doc_backend.dp_doc._pages == {}  # nothing left loaded natively
+
+    # Everything read from the parsed page still works, and matches a page
+    # that is decoded afresh.
+    segmented = page_backend.get_segmented_page()
+    assert segmented is not None
+    assert list(page_backend.get_text_cells()) == cells
+    bitmap_rects = list(page_backend.get_bitmap_rects())
+    text = page_backend.get_text_in_rect(BoundingBox(l=102, t=77, r=511, b=124))
+
+    fresh: DoclingParsePageBackend = doc_backend.load_page(0)
+    assert list(fresh.get_text_cells()) == cells
+    assert list(fresh.get_bitmap_rects()) == bitmap_rects
+    assert fresh.get_text_in_rect(BoundingBox(l=102, t=77, r=511, b=124)) == text
+
+    page_backend.unload()
+    fresh.unload()
+    doc_backend.unload()

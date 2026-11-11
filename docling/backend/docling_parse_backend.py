@@ -83,6 +83,15 @@ class DoclingParsePageBackend(ManagedPdfiumPageBackend):
         assert self._dp_doc is not None
         seg_page = self._dp_doc.get_page(self._page_no + 1, config=config)
 
+        # `seg_page` is a self-contained Python object; the native page it was
+        # decoded from is not needed again. docling-parse keeps ~1.3 GB of
+        # address space committed per decoded page until that page is
+        # unloaded, so unload it now rather than when this backend is closed:
+        # otherwise every page still travelling through the pipeline holds
+        # that commit (10-30 GB per conversion, which on Windows counts
+        # against RAM + page file even though it is never touched).
+        self._unload_native_page()
+
         # In Docling, all TextCell instances are expected with top-left origin.
         [
             tc.to_top_left_origin(seg_page.dimension.height)
@@ -199,10 +208,14 @@ class DoclingParsePageBackend(ManagedPdfiumPageBackend):
         #    height=self._dpage.dimension.height,
         # )
 
-    def _close_native_page(self) -> None:
+    def _unload_native_page(self) -> None:
+        """Free docling-parse's native page (not the pypdfium one)."""
         if not self._unloaded and self._dp_doc is not None:
             self._dp_doc.unload_pages((self._page_no + 1, self._page_no + 2))
             self._unloaded = True
+
+    def _close_native_page(self) -> None:
+        self._unload_native_page()
 
         with pypdfium2_lock:
             if self._ppage is not None:
